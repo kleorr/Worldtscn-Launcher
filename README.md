@@ -1,7 +1,7 @@
 # Worldtscn Launcher
 
 A modern, lightweight, and autonomous desktop launcher for the **worldtscn** voxel engine. Built with Python and CustomTkinter, it automates version tracking, handles build deployment directly from GitHub, and provides a seamless initialization experience for players.
-
+<img width="966" height="382" alt="Снимок экрана 2026-06-21 114315" src="https://github.com/user-attachments/assets/594a8236-3d89-48f4-9d01-1707eee67ec9" />
 ## 🚀 Key Features
 
 * **Automated Version Tracking:** Dynamically fetches all available tags, pre-alpha, and pre-release builds directly via the GitHub API.
