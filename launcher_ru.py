@@ -1,4 +1,6 @@
 import os
+import sys
+import re
 import json
 import zipfile
 import subprocess
@@ -8,10 +10,15 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox
 import requests
 
-# Настройки репозитория
+# Настройки игрового репозитория
 REPO = "kleorr/Worldtscn"
-API_URL = f"https://api.github.com/repos/{REPO}/tags" # Теги отдают ВСЕ версии железно
+API_URL = f"https://api.github.com/repos/{REPO}/tags" # Теги надежно возвращают ВСЕ версии
 CONFIG_FILE = "launcher_config.json"
+
+# Настройки автообновления ЛАУНЧЕРА
+LAUNCHER_VERSION = "1.1"  # Текущая версия этого файла (меняй при выпуске обновлений)
+LAUNCHER_REPO = "kleorr/Worldtscn-Launcher"
+LAUNCHER_API_URL = f"https://api.github.com/repos/{LAUNCHER_REPO}/releases/latest"
 
 ctk.set_default_color_theme("blue")
 
@@ -27,9 +34,13 @@ class GameLauncher(ctk.CTk):
         ctk.set_appearance_mode(self.config.get("theme", "dark"))
 
         self.releases_data = {}
+        self.launcher_update_url = None
         
         self.create_widgets()
+        
+        # Фоновые потоки для проверок
         threading.Thread(target=self.fetch_versions, daemon=True).start()
+        threading.Thread(target=self.check_launcher_updates, daemon=True).start()
 
     def load_config(self):
         default_config = {
@@ -60,10 +71,13 @@ class GameLauncher(ctk.CTk):
         self.title_label = ctk.CTkLabel(self.top_frame, text="Worldtscn", font=ctk.CTkFont(size=24, weight="bold"))
         self.title_label.pack(side="left")
 
-        self.settings_btn = ctk.CTkButton(self.top_frame, text="⚙ Настройки", width=100, height=32, 
+        self.settings_btn = ctk.CTkButton(self.top_frame, text="⚙ Настройки", width=110, height=32, 
                                           fg_color=("gray75", "gray25"), text_color=("black", "white"),
                                           hover_color=("gray65", "gray35"), command=self.open_settings)
         self.settings_btn.pack(side="right")
+        
+        # Кнопка обновления лаунчера (изначально скрыта)
+        self.update_btn = None
 
         self.main_frame = ctk.CTkFrame(self, corner_radius=15)
         self.main_frame.pack(fill="both", expand=True, padx=25, pady=10)
@@ -71,8 +85,9 @@ class GameLauncher(ctk.CTk):
         self.ver_label = ctk.CTkLabel(self.main_frame, text="Доступные версии игры:", font=ctk.CTkFont(size=14))
         self.ver_label.pack(pady=(20, 5))
 
-        self.version_combo = ctk.CTkComboBox(self.main_frame, width=220, state="readonly", values=["Загрузка..."])
+        self.version_combo = ctk.CTkComboBox(self.main_frame, width=220, state="disabled", values=["Загрузка..."])
         self.version_combo.pack(pady=5)
+        self.version_combo.set("Загрузка...")
         self.version_combo.configure(command=self.check_version_status)
 
         self.progress_bar = ctk.CTkProgressBar(self.main_frame, width=300)
@@ -95,11 +110,103 @@ class GameLauncher(ctk.CTk):
         self.github_link.pack(side="left")
         self.github_link.bind("<Button-1>", lambda e: webbrowser.open_new_tab("https://github.com/kleorr"))
 
-        self.dev_label = ctk.CTkLabel(self.bottom_frame, text="kleorr", font=ctk.CTkFont(size=11), text_color="gray")
+        self.dev_label = ctk.CTkLabel(self.bottom_frame, text=f"v{LAUNCHER_VERSION} | kleorr", font=ctk.CTkFont(size=11), text_color="gray")
         self.dev_label.pack(side="right")
 
     def open_settings(self):
         SettingsWindow(self)
+
+    def parse_version(self, version_str):
+        # Вытаскивает все blocks цифр из строки для корректного сравнения (1.4.0 -> (1, 4, 0))
+        digits = re.findall(r'\d+', version_str)
+        return tuple(map(int, digits))
+
+    def check_launcher_updates(self):
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            response = requests.get(LAUNCHER_API_URL, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                latest_tag = data.get("tag_name", "1.0")
+                
+                # Сверяем строго численно, чтобы старые версии не триггерили апдейт
+                if self.parse_version(latest_tag) > self.parse_version(LAUNCHER_VERSION):
+                    current_exe_name = os.path.basename(sys.argv[0]).lower()
+                    is_ru = "_ru" in current_exe_name
+                    
+                    assets = data.get("assets", [])
+                    target_url = None
+                    
+                    for asset in assets:
+                        asset_name = asset["name"].lower()
+                        if asset_name.endswith(".exe"):
+                            if is_ru and "_ru" in asset_name:
+                                target_url = asset["browser_download_url"]
+                                break
+                            elif not is_ru and "_ru" not in asset_name:
+                                target_url = asset["browser_download_url"]
+                                break
+                    
+                    if target_url:
+                        self.launcher_update_url = target_url
+                        self.root_update_ui(self.show_launcher_update_button)
+        except:
+            pass
+
+    def show_launcher_update_button(self):
+        if not self.update_btn:
+            self.update_btn = ctk.CTkButton(self.top_frame, text="▲ Обновить лаунчер", width=140, height=32, 
+                                            fg_color="#2fa572", text_color="white", hover_color="#107c41",
+                                            command=self.start_launcher_update)
+            self.update_btn.pack(side="right", padx=(0, 10))
+
+    def start_launcher_update(self):
+        self.update_btn.configure(state="disabled", text="Обновление...")
+        self.action_btn.configure(state="disabled")
+        threading.Thread(target=self.execute_launcher_update, daemon=True).start()
+
+    def execute_launcher_update(self):
+        try:
+            current_exe_path = os.path.abspath(sys.argv[0])
+            current_dir = os.path.dirname(current_exe_path)
+            new_exe_path = os.path.join(current_dir, "launcher_new.tmp")
+            
+            self.root_update_ui(lambda: self.status_label.configure(text="Скачивание обновления лаунчера...", text_color="#1f538d"))
+            
+            headers = {"User-Agent": "Mozilla/5.0"}
+            response = requests.get(self.launcher_update_url, headers=headers, stream=True)
+            
+            if response.status_code == 200:
+                with open(new_exe_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                
+                self.root_update_ui(lambda: self.status_label.configure(text="Перезапуск лаунчера...", text_color="green"))
+                
+                # Создаем батник для безопасной перезаписи занятого .exe процесса
+                bat_path = os.path.join(current_dir, "launcher_updater.bat")
+                bat_content = f"""@echo off
+:loop
+del /f /q "{current_exe_path}"
+if exist "{current_exe_path}" (
+    timeout /t 1 /nobreak >nul
+    goto loop
+)
+move /y "{new_exe_path}" "{current_exe_path}"
+start "" "{current_exe_path}"
+del "%~f0"
+"""
+                with open(bat_path, "w", encoding="cp866") as bat_file:
+                    bat_file.write(bat_content)
+                
+                subprocess.Popen([bat_path], shell=True, cwd=current_dir)
+                self.root_update_ui(self.destroy)
+            else:
+                self.root_update_ui(lambda: self.status_label.configure(text="Не удалось скачать обновление", text_color="red"))
+                self.root_update_ui(lambda: self.update_btn.configure(state="normal", text="▲ Обновить лаунчер"))
+        except Exception as e:
+            self.root_update_ui(lambda: self.status_label.configure(text=f"Ошибка обновления: {str(e)}", text_color="red"))
+            self.root_update_ui(lambda: self.update_btn.configure(state="normal", text="▲ Обновить лаунчер"))
 
     def fetch_versions(self):
         try:
@@ -113,37 +220,42 @@ class GameLauncher(ctk.CTk):
                 for tag_data in tags:
                     tag_name = tag_data["name"]
                     
-                    # Прямая ссылка на скачивание твоего готового скомпилированного .zip файла релиза
-                    # Например, из тега "1.2.0-pre-alpha" получится файл "Worldtscn.1.2.0-pre-alpha.zip"
-                    # Если у тебя в версии 1.0 файл называется game1.0.zip, мы добавим проверку ниже
-                    if tag_name == "1.0.0-pre-alpha":
-                        filename = "game1.0.zip"
+                    release_url = f"https://api.github.com/repos/{REPO}/releases/tags/{tag_name}"
+                    rel_response = requests.get(release_url, headers=headers)
+                    
+                    zip_url = None
+                    if rel_response.status_code == 200:
+                        rel_data = rel_response.json()
+                        assets = rel_data.get("assets", [])
+                        for asset in assets:
+                            if asset["name"].lower().endswith(".zip"):
+                                zip_url = asset["browser_download_url"]
+                                break
+                    
+                    if zip_url:
+                        self.releases_data[tag_name] = zip_url
                     else:
-                        # Для версий 1.1, 1.2, 1.3 и будущих (отсекаем '-pre-alpha' для имени файла, если архив назван просто Worldtscn.1.2.zip)
-                        # Давай сделаем универсально: проверяем структуру названия
-                        short_version = tag_name.split("-")[0] # получим "1.2.0" или "1.2"
-                        # Если в названии файла на гитхабе три цифры (1.2.0), оставляем так, если две (1.2) - убираем лишний ноль:
-                        if short_version.endswith(".0") and tag_name in ["1.1.0-pre-alpha", "1.2.0-pre-alpha", "1.3.0-pre-alpha"]:
-                            short_version = short_version[:-2] # превратит "1.2.0" в "1.2"
-                        
-                        filename = f"Worldtscn.{short_version}.zip"
-
-                    # Генерируем прямую ссылку на скачивание этого ассета из релиза
-                    download_url = f"https://github.com/{REPO}/releases/download/{tag_name}/{filename}"
-                    self.releases_data[tag_name] = download_url
+                        if tag_name == "1.0.0-pre-alpha":
+                            filename = "game1.0.zip"
+                        else:
+                            short_version = tag_name.split("-")[0] 
+                            if short_version.endswith(".0"):
+                                short_version = short_version[:-2] 
+                            filename = f"Worldtscn.{short_version}.zip"
+                        self.releases_data[tag_name] = f"https://github.com/{REPO}/releases/download/{tag_name}/{filename}"
 
                 if self.releases_data:
                     versions = list(self.releases_data.keys())
                     self.root_update_ui(lambda: self.version_combo.configure(values=versions, state="readonly"))
                     self.root_update_ui(lambda: self.version_combo.set(versions[0]))
                     self.root_update_ui(self.check_version_status)
-                    self.root_update_ui(lambda: self.status_label.configure(text="Готово к работе", text_color="green"))
+                    self.root_update_ui(lambda: self.status_label.configure(text="Готов к работе", text_color="green"))
                 else:
                     self.root_update_ui(lambda: self.status_label.configure(text="Теги не найдены", text_color="red"))
             else:
                 self.root_update_ui(lambda: self.status_label.configure(text=f"Ошибка API: {response.status_code}", text_color="red"))
         except Exception as e:
-            self.root_update_ui(lambda: self.status_label.configure(text="Нет соединения с интернетом", text_color="red"))
+            self.root_update_ui(lambda: self.status_label.configure(text="Нет подключения к интернету", text_color="red"))
 
     def root_update_ui(self, func):
         self.after(0, func)
@@ -231,9 +343,8 @@ class GameLauncher(ctk.CTk):
                 self.root_update_ui(lambda: self.progress_bar.set(1.0))
                 self.root_update_ui(lambda: self.status_label.configure(text="Установка завершена!", text_color="green"))
             else:
-                # Если файл релиза не найден по сформированной ссылке
-                self.root_update_ui(lambda: self.status_label.configure(text="Архив билда не найден в этом релизе", text_color="red"))
-                messagebox.showerror("Ошибка", f"Не удалось скачать билд. Проверьте, что файл релиза на GitHub называется правильно для тега {version}")
+                self.root_update_ui(lambda: self.status_label.configure(text="Архив сборки не найден в этом релизе", text_color="red"))
+                messagebox.showerror("Ошибка", f"Не удалось скачать сборку. Убедитесь, что имя файла ресурса релиза на GitHub соответствует тегу {version}")
         except Exception as e:
             self.root_update_ui(lambda: self.status_label.configure(text=f"Ошибка: {str(e)}", text_color="red"))
         
@@ -252,7 +363,7 @@ class GameLauncher(ctk.CTk):
             if self.config.get("close_on_launch", True):
                 self.destroy()
         else:
-            messagebox.showerror("Ошибка", "Файл игры не найден! Попробуйте перекачать заново.")
+            messagebox.showerror("Ошибка", "Исполняемый файл игры не найден! Пожалуйста, попробуйте скачать сборку заново.")
             self.check_version_status()
 
 
@@ -271,7 +382,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.create_settings_widgets()
 
     def create_settings_widgets(self):
-        self.path_label = ctk.CTkLabel(self, text="Папка с версиями игры:", font=ctk.CTkFont(size=13, weight="bold"))
+        self.path_label = ctk.CTkLabel(self, text="Директория установки игр:", font=ctk.CTkFont(size=13, weight="bold"))
         self.path_label.pack(anchor="w", padx=25, pady=(15, 2))
 
         self.path_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -284,7 +395,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.browse_btn = ctk.CTkButton(self.path_frame, text="Обзор", width=70, command=self.browse_dir)
         self.browse_btn.pack(side="right")
 
-        self.theme_label = ctk.CTkLabel(self, text="Тема оформления лаунчера:", font=ctk.CTkFont(size=13, weight="bold"))
+        self.theme_label = ctk.CTkLabel(self, text="Визуальная тема лаунчера:", font=ctk.CTkFont(size=13, weight="bold"))
         self.theme_label.pack(anchor="w", padx=25, pady=(15, 2))
 
         self.theme_switch = ctk.CTkSwitch(self, text="Темная тема", command=self.toggle_theme)
